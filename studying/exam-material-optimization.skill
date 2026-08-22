@@ -66,6 +66,13 @@ These rules are mandatory unless the user explicitly overrides them.
    - Preserve established technical terminology and any wording needed to express conditions, causality, distinctions, or scope precisely.
    - You may use mathematical notation, like \(\implies\), \(\forall\), \(\exists\) to connect cause and effect in natural-language statements when it improves clarity and concision.
 
+7. **Use stable, Anki-safe card formatting.**
+   - These rules apply to card contents (`Title` and `Backside`), not to the surrounding delivery format such as a fenced CSV block.
+   - Do not use Unicode symbols when an ASCII or MathJax/LaTeX equivalent is available. Prefer MathJax for mathematical, logical, and directional notation, e.g. \(\to\) instead of a Unicode arrow, \(\implies\) instead of a Unicode implication symbol, and \(\le\) / \(\ge\) instead of Unicode inequality symbols.
+   - Do not use Markdown formatting inside cards. Prefer MathJax text formatting where formatting is useful, e.g. \(\texttt{foo}\) instead of Markdown backticks and \(\textit{foo}\) instead of Markdown italics. Use \(\textbf{...}\) only when emphasis has real recall value.
+   - Prefer plain ASCII punctuation and separators when no mathematical notation is needed. Do not introduce decorative Unicode bullets, dashes, arrows, checkmarks, or similar glyphs.
+   - Preserve existing MathJax conventions when they are already consistent and valid; normalize mixed Markdown/Unicode formatting during optimization.
+
 ---
 
 # Source roles
@@ -453,6 +460,26 @@ Topic A vs. Topic B
 
 Use `(N)` only for genuinely fixed enumerations.
 
+## Card-content formatting
+
+Apply the formatting rules from the core contract consistently to every title and backside:
+
+- no Markdown emphasis or inline-code syntax inside card fields,
+- no Unicode arrows/operators/symbols where ASCII or MathJax/LaTeX can express the same thing,
+- use MathJax for symbolic notation and, when formatting is useful, for technical identifiers or emphasis,
+- keep ordinary prose and punctuation plain and portable.
+
+Examples:
+
+```text
+\(A \to B\)
+\(x \le y\)
+\(\texttt{iptables}\)
+\(\textit{stateful}\)
+```
+
+Do not emit the corresponding card content using Unicode arrows/relations or Markdown backticks/asterisks.
+
 ## Backsides
 
 Prefer:
@@ -662,7 +689,9 @@ Before delivery, verify:
 - [ ] merged cards remain coherent and important distinctions remain visible,
 - [ ] no card is overloaded or over-compressed,
 - [ ] prose is concise, natural, and no more complex or fragmentary than needed,
-- [ ] formulas and fixed enumerations remain correct,
+- [ ] card fields contain no Markdown formatting,
+- [ ] Unicode symbols have been replaced with ASCII or MathJax/LaTeX equivalents where available,
+- [ ] formulas, MathJax, and fixed enumerations remain correct,
 - [ ] the final deck is meaningfully more review-efficient unless the input was already near-optimal,
 - [ ] the final CSV parses successfully.
 
