@@ -62,9 +62,12 @@ These rules are mandatory unless the user explicitly overrides them.
 6. **Optimize language for clear, efficient recall.**
    - Prefer plain, modern, direct phrasing over needlessly formal, archaic, or syntactically complex prose.
    - Simplify connecting words and sentence structure when doing so preserves technical meaning, logical direction, and nuance.
-   - Concision does not require sentence fragments: use complete sentences when fragments would sound choppy, ambiguous, or hard to understand.
+   - Balance concision against readability: do not compress coherent prose into disconnected fragments that force the student to reconstruct omitted grammar, causality, or relationships during recall. Shorten prose only when the shorter form is genuinely clearer or more efficient to study.
+   - Do not add words or phrases merely because correct grammar or style would require them; omit them when they are not needed to preserve meaning, relationships, or recall efficiency.
+   - Short fragments and compact enumerations are appropriate when the items are structurally parallel and immediately understandable.
+   - Do not replace coherent prose with arbitrary lists of keywords, semicolon-separated fragments, or compressed shorthand merely to reduce character count.
    - Preserve established technical terminology and any wording needed to express conditions, causality, distinctions, or scope precisely.
-   - You may use mathematical notation, like \(\implies\), \(\forall\), \(\exists\) to connect cause and effect in natural-language statements when it improves clarity and concision.
+   - Prefer mathematical notation, like \(\implies\), \(\forall\), \(\exists\), where appropriate, to connect cause and effect in natural-language statements when it improves clarity and concision.
 
 7. **Use stable, Anki-safe card formatting.**
    - These rules apply to card contents (`Title` and `Backside`), not to the surrounding delivery format such as a fenced CSV block.
@@ -485,16 +488,19 @@ Do not emit the corresponding card content using Unicode arrows/relations or Mar
 Prefer:
 
 - concise, natural declarative phrasing,
-- short fragments only when they remain immediately clear,
-- semicolon-separated related properties when readable,
+- complete sentences when they make relationships or reasoning easier to understand,
+- short fragments only when they are structurally parallel and immediately clear,
+- semicolon-separated properties only when they form a natural, readable compact structure,
 - formula + interpretation,
 - explicit contrast wording,
 - single-line numbered closed lists.
 
 Avoid:
 
-- long explanatory paragraphs,
-- arbitrary agglomerations of sentence fragments,
+- unnecessarily long explanatory paragraphs,
+- arbitrary agglomerations of keywords or sentence fragments,
+- semicolon chains that force the reader to reconstruct omitted grammar or relationships,
+- compressing natural prose when the shorter version is not actually easier to recall,
 - needlessly formal or complex connective prose,
 - repeating the title,
 - motivational filler,
@@ -502,7 +508,7 @@ Avoid:
 - unrelated context,
 - hidden multi-part recall targets.
 
-Prefer the simplest natural wording that preserves the required precision. Do not compress so aggressively that readability, logical direction, preconditions, causality, scope, or boundary conditions become ambiguous.
+Prefer the shortest wording that remains naturally readable and preserves the required precision. Do not optimize for character count. A somewhat longer coherent sentence is better than a shorter collection of disconnected fragments when it makes causality, logical direction, preconditions, scope, contrasts, or boundary conditions easier to understand.
 
 ## Enumerations
 
@@ -627,9 +633,11 @@ Repair cards that:
 - have incorrect enumeration counts,
 - combine formulas with unrelated trivia,
 - become cognitively harder without sufficient benefit,
-- are so terse that conditions or meaning become ambiguous.
+- are so terse that conditions or meaning become ambiguous,
+- replace coherent relationships with disconnected keywords or fragments,
+- use dense semicolon-separated shorthand where ordinary prose would be easier to understand and recall.
 
-Compression should reduce **review cost**, not merely character count.
+Compression should reduce **review cost**, not merely card count or character count. Prefer natural prose whenever further compression would make the student reconstruct grammar, causality, or relationships during recall.
 
 ---
 
@@ -688,7 +696,9 @@ Before delivery, verify:
 - [ ] weak standalone details were actually removed or absorbed where appropriate,
 - [ ] merged cards remain coherent and important distinctions remain visible,
 - [ ] no card is overloaded or over-compressed,
-- [ ] prose is concise, natural, and no more complex or fragmentary than needed,
+- [ ] prose is concise and natural, but has not been shortened merely for character-count reduction,
+- [ ] fragments and semicolon-separated structures are used only when they remain immediately readable and structurally coherent,
+- [ ] no card requires reconstructing omitted grammar, causality, conditions, or relationships that clearer prose could state directly,
 - [ ] card fields contain no Markdown formatting,
 - [ ] Unicode symbols have been replaced with ASCII or MathJax/LaTeX equivalents where available,
 - [ ] formulas, MathJax, and fixed enumerations remain correct,
@@ -730,8 +740,6 @@ Absence of optional exam-priority evidence is not itself a blocking condition.
 
 ---
 
-# Guiding principle
+> **Produce the smallest practical set of strong recall targets that preserves semantic completeness of realistically examinable concepts, incorporates qualifying depth from authoritative non-slide course material, reflects priorities evidenced by the course, and remains naturally readable.**
 
-> **Produce the smallest practical set of strong recall targets that preserves semantic completeness of realistically examinable concepts, incorporates qualifying depth from authoritative non-slide course material, and reflects priorities evidenced by the course.**
-
-At the margin, protect the **examinable concept**, not every source detail. Prefer absorbing a marginal detail into a stronger card over either keeping it as a weak standalone card or deleting information required for correctness.
+At the margin, protect the **examinable concept**, not every source detail. Prefer absorbing a marginal detail into a stronger card over either keeping it as a weak standalone card or deleting information required for correctness. Compress wording only while doing so actually improves review efficiency; do not trade coherent prose for shorter but harder-to-read fragments.
