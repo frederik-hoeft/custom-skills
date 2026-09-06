@@ -1,0 +1,448 @@
+---
+name: dotnet-offline
+description: Bootstrap and validate a .NET development environment from a local SDK archive and an offline NuGet package archive, without relying on machine-wide installations or network package sources.
+---
+
+# .NET Offline Development
+
+Use this skill when a .NET repository must be restored, built, or tested in an isolated environment using a supplied .NET SDK archive and a supplied archive of NuGet packages.
+
+The goal is a deterministic toolchain that does not depend on:
+
+- a machine-wide .NET installation,
+- an existing user NuGet cache,
+- reachable package feeds,
+- stale packages left by previous tasks,
+- repository modifications made only to accommodate the local environment.
+
+The workflow is project-independent. Repository-specific restore/build scripts and instructions still take precedence when they encode real project requirements, but environment problems should be solved in the local tooling area rather than by changing project dependencies or source files.
+
+## Inputs
+
+For compilation, the supplied .NET archive must contain an SDK, not only a runtime. A runtime-only archive can execute compatible applications but cannot restore or compile a normal SDK-style project.
+
+Typical inputs are:
+
+- a source tree or repository,
+- a platform-appropriate .NET SDK archive such as `dotnet-sdk-<version>-linux-x64.tar.gz`,
+- an archive containing all required `.nupkg` files,
+- optionally, repository-specific build or restore instructions.
+
+Treat the supplied SDK and package archive as the toolchain source of truth. Do not silently fall back to globally installed SDKs or packages.
+
+## Core model
+
+Keep the offline toolchain outside the repository. A useful layout is:
+
+```text
+<work>/
+  repo/
+  tooling/
+    dotnet/
+    dotnet-home/
+    nuget-feed/
+    nuget-packages/
+    NuGet.Offline.Config
+```
+
+`dotnet/` contains the extracted SDK. `nuget-feed/` contains the `.nupkg` files extracted from the supplied package archive. `nuget-packages/` is an isolated NuGet global-packages cache populated from those packages.
+
+Do not reuse the normal user-level `~/.nuget/packages` cache for validation. A build that succeeds only because an unrelated package was already cached is not a valid offline build.
+
+## 1. Establish a clean tooling directory
+
+Create a dedicated tooling root separate from the repository:
+
+```bash
+TOOL_ROOT="<work>/tooling"
+DOTNET_ARCHIVE="<path-to-dotnet-sdk-archive>"
+NUGET_ARCHIVE="<path-to-nuget-package-archive>"
+
+mkdir -p "$TOOL_ROOT"
+rm -rf \
+  "$TOOL_ROOT/dotnet" \
+  "$TOOL_ROOT/dotnet-home" \
+  "$TOOL_ROOT/nuget-feed" \
+  "$TOOL_ROOT/nuget-packages"
+mkdir -p \
+  "$TOOL_ROOT/dotnet" \
+  "$TOOL_ROOT/dotnet-home" \
+  "$TOOL_ROOT/nuget-feed" \
+  "$TOOL_ROOT/nuget-packages"
+```
+
+When refreshing the NuGet archive, rebuild both `nuget-feed/` and `nuget-packages/` from scratch. Do not overlay a new package set on an old cache. Stale packages can hide an incomplete archive and make offline validation non-reproducible.
+
+## 2. Extract and activate the supplied .NET SDK
+
+For a Linux/macOS SDK tarball:
+
+```bash
+tar -xf "$DOTNET_ARCHIVE" -C "$TOOL_ROOT/dotnet"
+```
+
+For a ZIP-distributed SDK, use a ZIP implementation supported by the current environment and extract into the same directory.
+
+Activate only the local SDK:
+
+```bash
+export DOTNET_ROOT="$TOOL_ROOT/dotnet"
+export PATH="$DOTNET_ROOT:$PATH"
+export DOTNET_CLI_HOME="$TOOL_ROOT/dotnet-home"
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+export DOTNET_NOLOGO=1
+export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+export DOTNET_MULTILEVEL_LOOKUP=0
+```
+
+Validate it immediately:
+
+```bash
+dotnet --info
+dotnet --list-sdks
+```
+
+The reported SDK path and version must come from `DOTNET_ROOT`. If `dotnet --list-sdks` is empty, the archive is runtime-only or was extracted incorrectly.
+
+## 3. Extract the supplied NuGet archive
+
+Do not assume the host `unzip` supports the compression method used by the outer archive. Python's standard ZIP implementation supports common DEFLATE, BZIP2, and LZMA ZIP entries and is a useful deterministic fallback:
+
+```bash
+export NUGET_ARCHIVE TOOL_ROOT
+python3 - <<'PY'
+import os
+from pathlib import Path
+from zipfile import ZipFile
+
+archive = Path(os.environ["NUGET_ARCHIVE"])
+destination = Path(os.environ["TOOL_ROOT"]) / "nuget-feed"
+
+with ZipFile(archive) as zf:
+    root = destination.resolve()
+    for info in zf.infolist():
+        target = (destination / info.filename).resolve()
+        if target != root and root not in target.parents:
+            raise RuntimeError(f"Unsafe ZIP path: {info.filename}")
+    zf.extractall(destination)
+PY
+```
+
+Confirm that packages were actually supplied:
+
+```bash
+find "$TOOL_ROOT/nuget-feed" -type f -name '*.nupkg' -print -quit | grep -q . \
+  || { echo 'No .nupkg files found in NuGet archive' >&2; exit 1; }
+```
+
+## 4. Preseed an isolated NuGet global-packages cache
+
+A directory of `.nupkg` files can be used as a local NuGet source, but a large flat source may be slow and can still interact poorly with an otherwise network-oriented restore environment. For fully offline validation, preseed an isolated global-packages cache and then restore with all package sources disabled.
+
+The global-packages cache uses lower-case package IDs and normalized versions. NuGet ignores SemVer build metadata for the cache path, so a nuspec version such as `1.16.0+abcdef` belongs under `1.16.0`.
+
+The following script extracts every supplied package, writes the package archive and SHA-512 hash expected by NuGet, and creates cache metadata:
+
+```bash
+export TOOL_ROOT
+python3 - <<'PY'
+import base64
+import hashlib
+import json
+import os
+import shutil
+import stat
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from zipfile import ZipFile
+
+root = Path(os.environ["TOOL_ROOT"])
+feed = root / "nuget-feed"
+packages = root / "nuget-packages"
+
+
+def child_text(xml_root, name):
+    for element in xml_root.iter():
+        if element.tag.rsplit("}", 1)[-1] == name:
+            return (element.text or "").strip()
+    raise RuntimeError(f"Missing <{name}> in nuspec")
+
+
+def normalize_version(raw):
+    # NuGet's cache path does not include SemVer build metadata.
+    value = raw.split("+", 1)[0].strip().lower()
+    core, sep, prerelease = value.partition("-")
+    parts = core.split(".")
+
+    # NuGet normalized versions contain at least major.minor.patch.
+    while len(parts) < 3:
+        parts.append("0")
+
+    # Normalize numeric components without discarding a meaningful fourth part.
+    normalized = []
+    for part in parts:
+        normalized.append(str(int(part)) if part.isdigit() else part)
+    while len(normalized) > 3 and normalized[-1] == "0":
+        normalized.pop()
+
+    core = ".".join(normalized)
+    return f"{core}-{prerelease}" if sep else core
+
+
+def safe_extract(zf, destination):
+    destination = destination.resolve()
+    for info in zf.infolist():
+        target = (destination / info.filename).resolve()
+        if target != destination and destination not in target.parents:
+            raise RuntimeError(f"Unsafe package path: {info.filename}")
+    zf.extractall(destination)
+
+
+nupkgs = sorted(feed.rglob("*.nupkg"))
+if not nupkgs:
+    raise RuntimeError("No .nupkg files found")
+
+for nupkg in nupkgs:
+    with ZipFile(nupkg) as zf:
+        nuspecs = [n for n in zf.namelist() if n.lower().endswith(".nuspec")]
+        if not nuspecs:
+            raise RuntimeError(f"No nuspec in {nupkg}")
+
+        nuspec = ET.fromstring(zf.read(nuspecs[0]))
+        package_id = child_text(nuspec, "id")
+        version = normalize_version(child_text(nuspec, "version"))
+        package_id_lower = package_id.lower()
+
+        destination = packages / package_id_lower / version
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True)
+        safe_extract(zf, destination)
+
+    data = nupkg.read_bytes()
+    content_hash = base64.b64encode(hashlib.sha512(data).digest()).decode("ascii")
+    archive_name = f"{package_id_lower}.{version}.nupkg"
+
+    shutil.copyfile(nupkg, destination / archive_name)
+    (destination / f"{archive_name}.sha512").write_text(content_hash, encoding="ascii")
+    (destination / ".nupkg.metadata").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "contentHash": content_hash,
+                "source": str(nupkg.parent.resolve()),
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+# Direct ZIP extraction can leave package-owned POSIX tools non-executable.
+# Conservatively restore +x on binary/script payloads under RID runtime folders.
+for path in packages.rglob("*"):
+    if not path.is_file():
+        continue
+    posix = path.as_posix()
+    if "/runtimes/linux-" not in posix and "/runtimes/osx-" not in posix:
+        continue
+    try:
+        header = path.read_bytes()[:4]
+    except OSError:
+        continue
+    executable_payload = (
+        header.startswith(b"\x7fELF")
+        or header.startswith(b"#!")
+        or header in {
+            b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+            b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+            b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+        }
+    )
+    if executable_payload:
+        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+print(f"Seeded {len(nupkgs)} package archives into {packages}")
+PY
+```
+
+Point NuGet at that cache:
+
+```bash
+export NUGET_PACKAGES="$TOOL_ROOT/nuget-packages"
+```
+
+This cache should contain only packages from the supplied archive.
+
+## 5. Disable package sources for the validation restore
+
+Create an offline NuGet configuration outside the repository:
+
+```bash
+cat > "$TOOL_ROOT/NuGet.Offline.Config" <<'EOF_CONFIG'
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+  </packageSources>
+</configuration>
+EOF_CONFIG
+```
+
+A restore against this config proves that every non-SDK package is already available in the supplied offline cache. It also avoids DNS, proxy, certificate, audit-service, and package-source timeouts being mistaken for source-code failures.
+
+Do not add `nuget.org` as a fallback when validating an offline handoff.
+
+## 6. Sanitize inherited MSBuild environment properties
+
+MSBuild imports environment variables as properties. Generic CI/container variables can therefore accidentally change solution behavior.
+
+Inspect relevant variables before restore:
+
+```bash
+env | grep -Ei '^(platform|configuration|runtimeidentifier)=' || true
+```
+
+If they were not intentionally supplied for the build, clear them. A common container variable is `PLATFORM=linux/amd64`; MSBuild property names are case-insensitive, so it can be interpreted as the solution `Platform` property and break solution configuration selection.
+
+```bash
+unset PLATFORM Platform
+```
+
+Clear other build-shaping variables only when they are unintended. Do not discard a repository's deliberate `Configuration`, `RuntimeIdentifier`, or platform selection.
+
+## 7. Restore explicitly in offline mode
+
+Run the repository's intended restore target with the isolated cache and offline config. For example:
+
+```bash
+cd <repo-or-source-root>
+dotnet restore <solution-or-project> \
+  --configfile "$TOOL_ROOT/NuGet.Offline.Config" \
+  --force \
+  --no-cache
+```
+
+Avoid adding a `--runtime <RID>` merely because the host has that RID. An explicit runtime restore expands the required package set and should be used only when the project or requested validation actually requires it.
+
+Interpret restore failures precisely:
+
+- `NU1101` / `NU1102` with the source-less config means the supplied package archive is incomplete or has the wrong version.
+- SDK/reference-pack errors indicate an SDK archive mismatch or an SDK component missing from the supplied archive.
+- A network error means the restore was not actually isolated as intended.
+- A solution-configuration error involving an unexpected platform often comes from inherited environment properties rather than NuGet.
+
+Do not edit project package versions merely to make an incomplete offline archive restore.
+
+## 8. Build without another restore
+
+Once offline restore succeeds, compile without allowing an implicit second restore:
+
+```bash
+dotnet build <solution-or-project> --no-restore
+```
+
+This keeps the validation boundary clear: package acquisition was proven offline first, then compilation uses exactly that restored graph.
+
+In constrained containers or sandboxes, parallel MSBuild worker processes can occasionally stall or terminate without producing a normal compiler/package error. If a normal build hangs or loses an MSBuild child node, retry once with serial project execution:
+
+```bash
+dotnet build <solution-or-project> --no-restore -m:1
+```
+
+Treat this as a host-execution fallback, not as the normal project build mode. If the serial build succeeds, report the parallel-build problem as an environment limitation. If the serial build fails with an actual diagnostic, investigate that diagnostic normally. Do not use `-m:1` to hide a reproducible source failure.
+
+If the repository has its own build script, prefer it when possible, but ensure it does not perform an uncontrolled implicit restore. If necessary, invoke its underlying build target with `--no-restore` or the equivalent supported by the project.
+
+## 9. Run tests without package acquisition
+
+When test execution is part of the task:
+
+```bash
+dotnet test <solution-or-test-project> --no-restore --no-build
+```
+
+Use the repository's normal test entry point when it carries meaningful setup or filtering logic. The important invariant is that tests do not silently reacquire packages from the network.
+
+## 10. Diagnose package-owned native tools separately
+
+Some packages execute native tools during build, code generation, asset compilation, or tests. Direct cache seeding can expose file-mode differences that ordinary package installation hides.
+
+A failure such as:
+
+```text
+Permission denied: .../nuget-packages/<package>/<version>/runtimes/linux-.../<tool>
+```
+
+is an offline-cache extraction issue, not a C# compilation error. Verify that the referenced file is actually a package-owned executable and repair only that tool's execute bit:
+
+```bash
+chmod +x <referenced-package-tool>
+```
+
+The preseed script above repairs common ELF, Mach-O, and shebang payloads under RID-specific runtime folders automatically. Do not recursively mark every package file executable.
+
+## 11. Refreshing the toolchain
+
+When either supplied archive changes:
+
+- SDK archive changed: replace `dotnet/` and recreate `dotnet-home/`.
+- NuGet archive changed: replace `nuget-feed/` and rebuild `nuget-packages/` from scratch.
+- Both changed: rebuild the entire tooling root.
+
+Always rerun `dotnet --info`, offline restore, and the strongest relevant build/test validation after a refresh.
+
+Never retain old package-cache entries as a convenience. Package completeness should be established from the current archive alone.
+
+## Validation sequence
+
+A deterministic baseline validation normally follows this order:
+
+1. `dotnet --info`
+2. confirm the expected SDK is local to `DOTNET_ROOT`
+3. confirm the package archive contains `.nupkg` files
+4. seed a fresh isolated `NUGET_PACKAGES`
+5. disable all NuGet package sources
+6. sanitize unintended MSBuild environment properties
+7. `dotnet restore ... --configfile ... --force --no-cache`
+8. `dotnet build ... --no-restore`
+9. if the host stalls in parallel MSBuild, retry once with `-m:1` and classify the result separately
+10. run relevant tests with `--no-restore --no-build`
+11. verify the repository working tree remains unchanged by environment setup
+
+Report restore, compilation, and test results separately. If validation cannot complete, identify whether the blocker is:
+
+- the supplied SDK,
+- package completeness,
+- package-cache extraction/file modes,
+- an inherited environment property,
+- unsupported host tooling,
+- or an actual repository build/test failure.
+
+## Repository hygiene
+
+Offline bootstrapping is environment setup, not a project change.
+
+Unless the repository explicitly owns its offline-tooling configuration:
+
+- keep SDKs and NuGet caches outside the source tree,
+- do not commit temporary `NuGet.Config` files,
+- do not commit extracted packages or SDK files,
+- do not change dependency versions to match an incomplete handoff archive,
+- do not add environment-specific workarounds to production source,
+- check `git status` after validation.
+
+The source baseline should remain byte-for-byte unchanged unless the task separately calls for a repository modification.
+
+## Completion criteria
+
+Offline .NET setup is established when:
+
+- the supplied SDK runs from an isolated local `DOTNET_ROOT`,
+- the global package cache was recreated solely from the current supplied NuGet archive,
+- package sources are disabled for the validation restore,
+- restore succeeds without network access,
+- the requested project/solution builds using `--no-restore`,
+- requested tests run without package acquisition,
+- package-owned native tools have valid local permissions where required,
+- environment-specific failures are distinguished from source failures,
+- and the repository remains clean after toolchain setup.
