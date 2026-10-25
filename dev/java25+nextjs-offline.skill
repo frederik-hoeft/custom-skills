@@ -1,0 +1,146 @@
+---
+name: java-nextjs-offline
+description: Bootstrap and validate Java 25 Maven and Next.js development without network access, using supplied SDK/tool archives and clean, complete Maven/npm dependency caches. Use for isolated coding-agent workspaces, offline builds, or reproducible toolchain handoffs.
+---
+
+# Java 25 + Next.js offline development
+
+Provide a deterministic, isolated development environment using **only supplied archives and dependency
+stores**. Do not fall back to system SDKs, user package caches, public registries or remote bootstrap
+scripts. This is an environment-setup procedure, **not a repository change**. Adapt project paths and precise
+versions to its build metadata rather than assuming every Java/Next.js project has the same layout.
+
+## Required inputs
+
+| Artifact | Supply | Important constraint |
+| --- | --- | --- |
+| Java SDK | JDK **25** archive for host OS/architecture, including `javac` | Runtime-only/JRE archives are insufficient |
+| Java build tool | Maven binary matching the project wrapper's distribution (ShareWise: **3.10.0**) | A script-only wrapper may download Maven; use the supplied binary offline |
+| Maven dependencies | Complete prepared Maven local repository archive | Include parent POMs, BOMs, transitive JARs, project plugins, plugin dependencies and metadata |
+| JavaScript SDK | Node.js distribution with npm (ShareWise devcontainer: **Node 24**) | Record exact Node and npm versions; ensure runtime compatibility |
+| npm dependencies | Complete npm cache matching the project's lockfile | Include tarball content/integrity records and transitive/optional dependencies |
+| Native dependencies | OS/CPU/libc-compatible native npm packages | Next.js SWC, Tailwind oxide, Lightning CSS, and any project-specific native modules |
+| Host prerequisites | Compatible libc, certificates, shell, compression tools | Archive alone may not contain every runtime shared library |
+
+Optional for full integration/E2E validation: local PostgreSQL installation or an offline container image,
+other services, browser binaries (if browser tests exist), and tooling/test fixtures required by the actual
+repository. Keep these assets separate and clearly inventoried.
+
+## Workspace isolation
+
+Prepare a clean tooling tree **outside the repository**:
+
+```text
+<workspace>/
+  repo/
+  tooling/
+    jdk-25/
+    maven/
+    maven-repository/
+    node/
+    npm-cache/
+    logs/
+```
+
+Extract supplied archives into the corresponding empty directories. Replace previous tooling and caches
+rather than layering a new archive on top of stale content. Reject unsafe archive paths and do not follow
+untrusted extraction symlinks outside the tooling root.
+
+Initialize the supplied toolchain explicitly:
+
+```sh
+export TOOL_ROOT=/absolute/path/to/tooling
+export JAVA_HOME="$TOOL_ROOT/jdk-25"
+export PATH="$JAVA_HOME/bin:$TOOL_ROOT/maven/bin:$TOOL_ROOT/node/bin:$PATH"
+export MAVEN_REPO="$TOOL_ROOT/maven-repository"
+export npm_config_cache="$TOOL_ROOT/npm-cache"
+export npm_config_update_notifier=false
+export npm_config_audit=false
+export npm_config_fund=false
+
+java -version
+javac -version
+mvn -version
+node --version
+npm --version
+```
+
+Verify every executable actually resolves inside the supplied tooling tree. Don't silently use global
+Maven, a different Java release, or a user's existing `.m2`/npm cache.
+
+## Prepare complete caches on a networked build machine
+
+**Maven**
+
+1. Use the **same platform, JDK, Maven release, project revision and build profiles** intended for the
+   offline consumer. Point Maven at a **new, empty** local repository, not `~/.m2/repository`.
+2. Resolve project dependencies and plugins, e.g. `mvn -Dmaven.repo.local=... dependency:go-offline`.
+   This is a preparation step, **not** proof that every build plugin or dynamically requested artifact is
+   already present.
+3. Execute the full intended build/tests once to populate the cache, then run an **offline** rehearsal in a
+   clean environment with only that cache. Include `clean`, test, packaging, code generation and build
+   profiles used in actual work.
+4. Archive the whole proven `maven-repository/` with its repository layout; do not flatten JARs or omit POMs.
+
+**npm / Next.js**
+
+1. Use the exact committed lockfile and Node/npm versions with a **new, empty** npm cache.
+2. Run `npm ci --cache <cache-path>` to populate it. Supply all relevant optional native artifacts for the
+   intended offline OS/CPU/libc. Cache portability across Windows and Linux must not be assumed.
+3. In a fresh checkout without `node_modules`, rehearse `npm ci --offline --cache <cache-path>` with network
+   access disabled, followed by the project's lint/test/build commands.
+4. Archive the verified npm cache. A separately prepared, platform-matched `node_modules` archive may be a
+   fallback, but it must not conceal missing packages when verifying the npm cache itself.
+
+Package a manifest of archive checksums, tool versions, target platform and libc, lockfile/project hashes,
+validated commands, and known exclusions. Exclude secrets and absolute machine-specific configuration.
+
+## Validate offline on the receiving machine
+
+From the backend project directory, use the **supplied Maven executable** rather than allowing a wrapper to
+bootstrap itself over the network:
+
+```sh
+mvn -o -Dmaven.repo.local="$MAVEN_REPO" clean verify
+```
+
+`-o` disables Maven's remote resolution. Missing plugins, parent POMs, transitive artifacts, or generated
+code dependencies indicate an **incomplete supplied cache**, not a reason to change source dependencies.
+If the project has required profiles or additional build goals, run them offline too.
+
+From the frontend project directory, after removing any previous `node_modules`:
+
+```sh
+npm ci --offline --cache "$npm_config_cache"
+npm run lint
+npm run build
+```
+
+Run the commands in a network-isolated environment where feasible. `npm ci --offline` may still execute
+project/package lifecycle scripts, so inspect whether any of those scripts independently access the network.
+A successful cache restoration alone is not proof that the Next.js build can run offline: application builds
+may request remote fonts, assets, telemetry or additional binaries.
+
+Never modify the product's lockfile, package versions or source merely to paper over missing offline
+artifacts. Resolve environmental problems in the tooling area and report genuine application-required remote
+resources separately.
+
+## Diagnostics and reporting
+
+Distinguish the following outcomes explicitly:
+
+- **Toolchain:** JDK, Maven, Node and npm present and resolved from supplied archives.
+- **Dependency completeness:** Maven `-o` and npm `--offline` succeeded from clean caches with no network.
+- **Compilation/build:** Backend compilation and frontend production build succeeded independently.
+- **Tests and analysis:** Backend/frontend tests, lint, formatting and any required integration tests.
+- **External services:** Database, browser, container and other optional runtime dependencies available or not.
+
+If a test requires a missing PostgreSQL image or package download, report that as an infrastructure blocker,
+not a passing test or a product regression. Validate that environment setup leaves the repository's tracked
+files unchanged. Retain logs outside the repository for reproducibility.
+
+## Completion criteria
+
+The offline environment is ready only when the supplied JDK and tools are verified; Maven and npm dependencies
+are fully available in isolated stores; the requested build/test commands succeed **without network access**;
+and any unsupported integration or browser tests are clearly identified rather than guessed at.
