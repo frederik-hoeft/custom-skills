@@ -9,6 +9,7 @@ Each skill is a self-contained Markdown document with a YAML frontmatter block d
 ```text
 dev/
   dotnet-offline.skill
+  java-nextjs-offline.skill
   local-development.skill
   technical-documentation.skill
 studying/
@@ -44,6 +45,7 @@ The `description` is written so an agent can decide whether the skill applies to
 ### dev
 
 - [dev/dotnet-offline.skill](dev/dotnet-offline.skill) — Bootstrap and validate a .NET development environment from a supplied SDK archive and an offline NuGet package archive for development work in isolated/sandboxed environments. Covers isolated `DOTNET_ROOT`, preseeding an isolated global-packages cache from `.nupkg` files, disabling all package sources for restore validation, sanitizing inherited MSBuild environment properties, and diagnosing package-owned native tool permissions.
+- [dev/java-nextjs-offline.skill](dev/java-nextjs-offline.skill) — Bootstrap and validate Java/Maven and Node.js/Next.js development using separately supplied JDK, Maven, Node.js, and Maven/npm dependency-cache archives. Covers isolated toolchains and caches, integrity and manifest checks, strictly offline builds and tests, and diagnosing incomplete or network-dependent handoffs while keeping source snapshots independent of dependencies.
 - [dev/local-development.skill](dev/local-development.skill) — Approval-driven feature-branch and patch workflow for local Git repositories. One coherent task per branch, patch-based review against an approved baseline, incremental patches for follow-ups, and merge only after user approval.
 - [dev/technical-documentation.skill](dev/technical-documentation.skill) — Architecture-first technical documentation guidance. Describe the steady-state system, keep implementation detail at the right abstraction level, preserve good existing documentation, and keep related documents internally coherent after code changes.
 
