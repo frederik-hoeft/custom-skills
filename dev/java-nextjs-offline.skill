@@ -1,0 +1,262 @@
+---
+name: java-nextjs-offline
+description: Bootstrap, build, and test Java/Maven and Node.js/Next.js projects entirely offline using separately supplied JDK, Maven, and Node archives plus a verified Maven/npm dependency-cache archive. Use when project source is delivered independently of the reusable Linux toolchain and dependencies.
+---
+
+# Java + Next.js offline development
+
+Use this skill when working with a Java/Maven backend and a Node.js/Next.js frontend in a network-isolated workspace. The source repository is supplied **separately** from the reusable dependency handoff. The goal is to build from the supplied tools and caches without relying on globally installed language SDKs, a developer's home-directory caches, live registries, or prior workspace state.
+
+This skill is **project-agnostic**. Determine actual project layout, tool versions, package managers, build goals, profiles, and test entry points from its source and documentation. The examples below describe a Linux x86-64 Maven/npm handoff; never assume they automatically apply to other architectures, JavaScript package managers, or non-Maven Java builds.
+
+## Required handoff and boundaries
+
+The standard handoff has **four independently supplied artifacts**:
+
+1. A **full JDK archive** for the target architecture, such as `OpenJDK25U-jdk_x64_linux_hotspot_*.tar.gz`. It must contain `javac`, not just a JRE.
+2. A **Maven binary distribution**, such as `apache-maven-3.10.0-bin.zip`. A Maven wrapper configured as *only-script* may try to download this distribution, so do not rely on its bootstrap path while offline.
+3. A **Node.js distribution including npm**, such as `node-v24.*-linux-x64.tar.xz`.
+4. A **dependency-only archive**, such as `*-offline-deps-linux-x64.tar.gz`, containing isolated Maven and npm caches and, ideally, manifests, checksum metadata, and an optional offline verifier. No source checkout or unpacked SDK is required inside this archive.
+
+The Git repository or source ZIP, documentation, task instructions, and any code patches are **separate inputs**. Ordinary source edits do not require repackaging the dependency archive; new or changed dependency descriptors, build profiles, plugins, or native targets may.
+
+Optional additional inputs depend on the project: databases, container images, browsers, generated artifacts, code-generation tools, private package credentials (only for online preparation), certificates, native system libraries, or fixtures. Their absence may limit integration tests, even when compilation succeeds.
+
+Use the supplied archives as the source of truth. Do not silently use system Java/Maven/Node, `~/.m2/repository`, `~/.npm`, online registries, or unrelated caches to fill gaps. Do not edit project dependency versions merely to accommodate an incomplete handoff.
+
+## 1. Establish an independent, clean workspace
+
+Use separate roots for source, immutable input archives, extracted tools, mutable local caches, temporary build outputs, and logs. For example:
+
+```text
+<work>/
+  source/                     # Supplied checkout/ZIP; not embedded in the handoff
+  inputs/
+    offline-deps-linux-x64.tar.gz
+    offline-deps-linux-x64.tar.gz.sha256   # If supplied
+    toolchains/
+      OpenJDK...tar.gz
+      apache-maven-...zip
+      node-...tar.xz
+  handoff/                    # Extracted dependency-only archive
+    manifest/
+    cache/
+      maven/
+      npm/
+    verify-offline.sh         # Optional, bundle-specific
+  tooling/
+    jdk/
+    maven/
+    node/
+    maven-repository/         # Isolated working copy of supplied cache
+    npm-cache/                # Isolated working copy of supplied cache
+    home/
+    logs/
+```
+
+Keep all generated environment content **outside the source tree**. For a newly supplied handoff, clear the previous extracted tools and working caches; don't overlay new inputs on stale dependencies. Preserve the original archives to enable checksum validation and reconstruction. Never delete an existing source tree or user data as part of a cache reset.
+
+If the workspace already has a valid extracted dependency directory, validate it rather than unpacking a second copy needlessly. If caches will be modified by builds, use a working copy so the pristine handoff remains reproducible.
+
+## 2. Verify artifact integrity and platform compatibility
+
+Inspect files *before* extracting large archives. Check that the files are fully materialized and consistent with any published checksums:
+
+```bash
+sha256sum -c /absolute/path/to/offline-deps-linux-x64.tar.gz.sha256
+```
+
+Run that command from the directory expected by the checksum file, or use a checksum manifest with paths adjusted to the actual archive location. Do not declare the handoff complete if the archive is truncated or its checksum fails.
+
+After extracting the dependency bundle, prefer its **exact** toolchain manifest and checksum list when available. A common layout is:
+
+```text
+handoff/manifest/toolchain-files.txt
+handoff/manifest/toolchain-archive-sha256.txt
+handoff/manifest/dependencies.sha256
+```
+
+If `toolchain-archive-sha256.txt` contains original filenames, validate it from the directory holding the three archives:
+
+```bash
+(cd /absolute/path/to/inputs/toolchains && \
+  sha256sum -c /absolute/path/to/handoff/manifest/toolchain-archive-sha256.txt)
+```
+
+Check that the archive names and embedded versions agree with the source project's toolchain requirements, not merely that hashes match. SHA-256 establishes consistency with the supplied manifest, **not authenticity by itself**; when provenance matters, also verify vendor-published checksums or trusted signatures independently.
+
+Use Linux x86-64 toolchains only on compatible Linux x86-64 hosts. For native npm packages, distinguish glibc from musl and check architecture compatibility. Archive format alone does not guarantee ABI compatibility. Node/Next.js native binaries such as SWC, Lightning CSS, or image libraries can be platform-specific.
+
+**Symlink warning:** Linux JDK/Node distributions normally contain relative symlinks (`bin/npm` and JDK license links, for example). Extract on Linux/WSL with a symlink-preserving tool such as GNU `tar`. A Windows extractor may reject otherwise safe `../` links and produce an incomplete toolchain; missing `npm` after extraction is not necessarily a broken vendor archive.
+
+Avoid unsafe archive extraction. Inspect provenance and archive entries, and reject absolute paths or traversal entries leading outside the intended tooling root. Do not blindly follow archive symlinks out of the extraction destination. Never run arbitrary executables from untrusted archives merely because they unpack successfully.
+
+## 3. Extract and activate the supplied tools
+
+The commands below assume **each vendor archive contains one top-level directory**, as is typical for the official distributions. Inspect actual archive layout first. Set paths to the independent archives supplied for the task:
+
+```bash
+WORK=/absolute/path/to/work
+JDK_ARCHIVE=/absolute/path/to/OpenJDK25U-jdk_x64_linux_hotspot_....tar.gz
+NODE_ARCHIVE=/absolute/path/to/node-v24....-linux-x64.tar.xz
+MAVEN_ARCHIVE=/absolute/path/to/apache-maven-....-bin.zip
+
+mkdir -p "$WORK/tooling" "$WORK/tooling/home" "$WORK/tooling/logs"
+mkdir -p "$WORK/tooling/extract-jdk" "$WORK/tooling/extract-node" "$WORK/tooling/extract-maven"
+
+tar -xf "$JDK_ARCHIVE" -C "$WORK/tooling/extract-jdk"
+tar -xf "$NODE_ARCHIVE" -C "$WORK/tooling/extract-node"
+# With the verified Maven ZIP and an available unzip implementation:
+unzip -q "$MAVEN_ARCHIVE" -d "$WORK/tooling/extract-maven"
+
+# The verified vendor archives are expected to have one directory at the root.
+install_single_root() {
+    local extraction_root="$1" destination="$2"
+    local -a roots
+    mapfile -d '' -t roots < <(find "$extraction_root" -mindepth 1 -maxdepth 1 -type d -print0)
+    [[ "${#roots[@]}" -eq 1 ]] || {
+        printf 'Expected exactly one extracted root in %s\n' "$extraction_root" >&2
+        return 1
+    }
+    mkdir -p "$destination"
+    cp -a "${roots[0]}/." "$destination/"
+}
+install_single_root "$WORK/tooling/extract-jdk" "$WORK/tooling/jdk"
+install_single_root "$WORK/tooling/extract-maven" "$WORK/tooling/maven"
+install_single_root "$WORK/tooling/extract-node" "$WORK/tooling/node"
+chmod +x "$WORK/tooling/maven/bin/mvn"  # Only if the ZIP lost executable bits
+```
+
+This example assumes the input archives have already been authenticated/validated and the destination tooling directories are fresh. Inspect the archive layout if it differs; do not copy an arbitrary extracted tree merely to satisfy the example. For Maven, use an available ZIP extractor (`unzip`, Python's `zipfile` with path validation, or the extracted JDK's `jar` tool). Python installations missing standard-library modules such as `shutil` need repair or an alternate extractor. Do not add an Internet-based installer as a fallback.
+
+Activate the **supplied** tooling explicitly:
+
+```bash
+export JAVA_HOME="$WORK/tooling/jdk"
+export MAVEN_HOME="$WORK/tooling/maven"
+export NODE_HOME="$WORK/tooling/node"
+export PATH="$JAVA_HOME/bin:$MAVEN_HOME/bin:$NODE_HOME/bin:$PATH"
+export NEXT_TELEMETRY_DISABLED=1
+export NPM_CONFIG_AUDIT=false NPM_CONFIG_FUND=false
+export NPM_CONFIG_UPDATE_NOTIFIER=false
+
+command -v java javac mvn node npm
+java -version
+javac -version
+mvn --version
+node --version
+npm --version
+```
+
+Every resolved binary must be inside the **supplied** toolchain directories and have a compatible version. `java` executing is insufficient if `javac` is absent; `node` executing is insufficient if `npm` was lost during extraction. Be wary of environment variables such as `JAVA_TOOL_OPTIONS`, `MAVEN_OPTS`, `NODE_OPTIONS`, and npm configuration inherited from an unrelated host setup.
+
+## 4. Extract dependency caches without stale state
+
+The dependency archive commonly holds `cache/maven` (the complete Maven local repository) and `cache/npm` (npm's content-addressed download cache), plus manifests and a verifier. It should **not** be treated like a ZIP of JARs/npm packages to flatten. Preserve the internal directory layouts exactly.
+
+```bash
+mkdir -p "$WORK/handoff" "$WORK/tooling/maven-repository" "$WORK/tooling/npm-cache"
+tar -xzf /absolute/path/to/offline-deps-linux-x64.tar.gz -C "$WORK/handoff"
+cp -a "$WORK/handoff/cache/maven/." "$WORK/tooling/maven-repository/"
+cp -a "$WORK/handoff/cache/npm/." "$WORK/tooling/npm-cache/"
+
+export MAVEN_REPO="$WORK/tooling/maven-repository"
+export NPM_CONFIG_CACHE="$WORK/tooling/npm-cache"
+```
+
+On cache refresh, recreate `maven-repository/` and `npm-cache/` from the current handoff rather than merging with older content. Both tools can write cache metadata during builds; use isolated working copies to avoid silently changing the input archive's cache. An empty cache directory is **not** an acceptable substitute for a missing handoff.
+
+Do not assume `node_modules` is supplied: `npm ci --offline` reconstructs it from the cache and lockfile. Maven's `target/`, Next.js's `.next/`, and other generated outputs are not project dependencies and generally should not be bundled.
+
+Check the source tree and dependency manifests against the bundle's recorded checksums when provided. A repository-independent skill must *discover* those manifest paths rather than hardcoding a project's source layout. A manifest mismatch is a reason to inspect dependency changes or regenerate the cache, **not** a reason to overwrite the source manifest. A changed application source file with unchanged dependency descriptors is normally fine.
+
+## 5. Prefer a bundle-supplied verifier when applicable
+
+If the extracted handoff contains `verify-offline.sh`, inspect its usage, source paths, and shell behavior first. It may be tailored to the repository that generated it rather than portable to every Maven/Next.js project. Use it **only when its expected layout matches the supplied source** and it provides a genuinely offline check.
+
+For the currently established four-artifact handoff convention, a verifier may support:
+
+```bash
+"$WORK/handoff/verify-offline.sh" verify "$WORK/handoff" \
+  --source /absolute/path/to/source \
+  --toolchains /absolute/path/to/inputs/toolchains
+```
+
+It should compare dependency descriptor hashes, check the three SDK archive hashes, extract the tools into temporary storage, and compile a fresh source copy with Maven offline mode and npm offline mode. Its success is useful evidence of **baseline compatibility**, not a substitute for understanding build commands and testing edited source files.
+
+If no verifier is supplied, or its project-specific assumptions do not apply, use the generic workflow below. Do not modify source code or falsify a verifier's manifest to make a mismatch disappear.
+
+## 6. Identify build entry points and manifests from the source
+
+Read project instructions and discover actual paths:
+
+- Maven: `pom.xml`, `.mvn/`, parent/multi-module POMs, Maven wrapper distribution URL, profiles, plugins, and test goals. Identify whether the build is Maven at all before running `mvn`.
+- JavaScript: `package.json`, lockfile (`package-lock.json` for npm), `engines`, workspace definitions, local `.npmrc`, frontend scripts, native optional dependencies, and build-time external assets.
+- Additional code generation, integration services, or browser setup required for the requested task.
+
+The presence of a Maven wrapper does not mean its Maven distribution is cached. Prefer the extracted Maven executable matching the wrapper's version; do not call a script-only `./mvnw` if it would download Maven.
+
+If the frontend uses pnpm/yarn rather than npm, or the backend uses Gradle, **stop treating this specific Maven/npm handoff as proven complete**. Use project-appropriate offline assets and commands instead of silently switching package managers or generating a new lockfile.
+
+## 7. Restore, compile, and test strictly offline
+
+Set `JAVA_HOME`, `PATH`, `MAVEN_REPO`, and `NPM_CONFIG_CACHE` as above. Use project-specific directories and test commands rather than assuming the examples are universal.
+
+**Maven** (from its project root or reactor root):
+
+```bash
+mvn -B -ntp -o "-Dmaven.repo.local=$MAVEN_REPO" clean verify
+```
+
+`-o` prevents remote artifact resolution. The cache must include parent POMs, imported BOMs, transitive dependencies, build plugins and plugin dependencies, annotation processors, test dependencies, and artifacts needed by active profiles or generated-source steps. `dependency:go-offline` on the preparation machine alone does **not** prove the full build will work offline. If additional tasks need `package`, `integration-test`, special profiles or generators, execute those explicitly as well.
+
+**npm / Next.js** (from the frontend directory containing the intended lockfile):
+
+```bash
+npm ci --offline --include=optional --no-audit --no-fund
+npm run lint      # Only if this script exists
+npm run build
+npm test          # Only if this script exists and is relevant
+```
+
+`npm ci` replaces `node_modules` with a clean install from the lockfile. `--offline` is strict; `--prefer-offline` is **not** a suitable proof of cache completeness. Keep native optional dependencies enabled when the project requires them. Avoid `--ignore-scripts` as a blanket workaround because some native packages need lifecycle scripts; inspect scripts if they unexpectedly fetch from the network.
+
+For a stronger proof than package-manager flags, repeat in a fresh source copy and with actual network isolation where the host permits it. Install/build scripts, Next.js `next/font/google`, generated client downloads, browser installation, and integration tests may independently reach the network even when npm/Maven resolution is offline. Mark those as separate build-time or runtime dependencies. Avoid hiding such failures by changing product behavior unless that is itself an approved source task.
+
+Run tests, linting, type checks, compilation, packaging, and other relevant repository checks independently. Do not claim a successful dependency restore also proves the app builds or tests pass.
+
+## 8. Distinguish environment failures from source defects
+
+| Symptom | Likely classification and response |
+| --- | --- |
+| `java` works but `javac` is missing | Supplied JRE or incomplete JDK extraction; do not change source |
+| `npm` is absent after Node extraction | Skipped symlink or incomplete extraction; re-extract correctly on Linux |
+| Maven cannot find a plugin/dependency with `-o` | Incomplete or mismatched Maven cache, POM, build profile, or version |
+| `npm ci --offline` reports a missing cached package | Incomplete npm cache, lockfile mismatch, or platform-specific optional dependency |
+| Native SWC/other package fails to load | Platform/CPU/libc mismatch or installation/build-script problem |
+| Next.js attempts to fetch fonts/assets | Build-time external requirement not satisfied by the npm cache |
+| Backend needs PostgreSQL / browser E2E needs a browser | Separate integration dependency; not proof that Maven/npm cache is bad |
+| Checksum or descriptor hash mismatch | Wrong, damaged, or stale handoff; verify and regenerate rather than bypassing checks |
+| CaaS/upload crashes on one large file | Artifact transport/extraction problem; inspect sizes and digests, transfer original SDKs separately, and distinguish it from project compilation |
+
+Do not conflate environment, dependency completeness, code compilation, and test assertions. Keep actionable logs of commands, exit codes, discovered versions, and the exact local paths used.
+
+## 9. Reuse, refresh, and reporting
+
+You generally **do not** need to repack the environment for ordinary code changes or feature branches. Reuse the independently supplied archives if their exact toolchain versions, platform, dependency descriptors, profiles, and package-lock data remain compatible. Refresh or regenerate when the Java/Maven/Node version changes, a POM/build plugin/lockfile changes, new generated tools are introduced, the target Linux ABI changes, or an offline build demonstrates that the cache is incomplete.
+
+When updating dependencies, acquire and verify them on a separate networked preparation machine. Populate *fresh* Maven and npm caches, run the real build/test tasks online, then rehearse a clean offline build. Package only the proven caches, manifests, and optional verifier; distribute the three original vendor archives separately, with checksum files. Do not put SDKs, extracted `node_modules`, generated outputs, Git history, or product source into the dependency archive just for convenience.
+
+After setup or validation, check the source repository's working tree for accidental modifications. Build outputs may be untracked and ignored, but no tracked product file should change merely to make the sandbox work.
+
+Report these separately:
+
+1. **Inputs/integrity:** received archives and checksum/descriptor matches or mismatches.
+2. **Toolchain:** exact JDK/Maven/Node/npm versions and paths, plus host architecture.
+3. **Dependencies:** Maven offline resolution and npm offline installation outcomes.
+4. **Application checks:** compile, test, lint, TypeScript, Next.js build, and any relevant integration checks.
+5. **Limitations:** missing external services, unavailable tools, network isolation not enforced, or incomplete test coverage.
+
+## Completion criteria
+
+Offline development is ready only when the **supplied** JDK/Maven/Node/npm executables work from isolated local directories; Maven and npm depend exclusively on the supplied cache; the actual requested source builds and tests with their intended scripts; and remaining integration/environment gaps are explicitly reported. A missing or truncated archive, unverified cache, silently substituted system tool, or network-dependent build does not meet that standard.
